@@ -3,7 +3,7 @@ Original Source: Optimization on Stiefel Manifold via Cayley Transform
 https://github.com/JunLi-Galios/Optimization-on-Stiefel-Manifold-via-Cayley-Transform
 """
 
-import math_custom
+from optimize import math_custom
 import torch
 import torch.nn as nn
 import torch.cuda.comm as comm

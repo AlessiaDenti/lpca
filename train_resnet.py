@@ -187,11 +187,12 @@ def TestStandard(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir,
 
 ### --------------------------------------------------------------------------------------------
 
-optimizer1 = stiefel_opti(param_g, opt.lrg) # KPCA
-optimizer2 = torch.optim.Adam(param_e1, lr=opt.lr, weight_decay=0) # or SGD
+# optimizer1 = stiefel_opti(param_g, opt.lrg) # KPCA
+# optimizer2 = torch.optim.Adam(param_e1, lr=opt.lr, weight_decay=0) # or SGD
 
 ### -------------------------------------- Training  --------------------------------------- ###
-def Train(epoch, optimizer, net_feat, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn):
+def Train(epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, \
+        dist, mask_feat_dim, dropout, freeze_bn, lrSchedule, warmUpIter, ......):
 
     msg = '\nEpoch: {:d}'.format(epoch)
     print (msg)
@@ -248,15 +249,18 @@ def Train(epoch, optimizer, net_feat, net_cls, trainloader, criterion, dist, mas
 
 
 ### ------------------------------------ Lr Warm Up  --------------------------------------- ###
-def LrWarmUp(warmUpIter, lr, optimizer, net_feat, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn) :
+def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn) :
 
     nbIter = 0
 
     while nbIter < warmUpIter:
         net_feat.train(freeze_bn = freeze_bn)
+        net_lpca.train()
         net_cls.train()
 
-        losses = utils.AverageMeter()
+        losses_total = utils.AverageMeter()
+        losses_ce = utils.AverageMeter()
+        losses_lpca = utils.AverageMeter()
         top1 = utils.AverageMeter()
         top5 = utils.AverageMeter()
 
@@ -264,41 +268,46 @@ def LrWarmUp(warmUpIter, lr, optimizer, net_feat, net_cls, trainloader, criterio
             nbIter += 1
             if nbIter == warmUpIter:
                 break
-            lrUpdate = nbIter / float(warmUpIter) * lr
-            for optim in optimizer:
+            lrUpdate1 = nbIter / float(warmUpIter) * lr
+            lrUpdate2 = nbIter / float(warmUpIter) * lrg
+            for optim in optimizer1:
                 for g in optim.param_groups:
-                    g['lr'] = lrUpdate
+                    g['lr'] = lrUpdate1
+            for optim in optimizer2:
+                for g in optim.param_groups:
+                    g['lr'] = lrUpdate2
 
             inputs = inputs.cuda()
             targets = targets.cuda()
 
-            for optim in optimizer:
+            for optim in optimizer1:
+                optim.zero_grad()
+            for optim in optimizer2:
                 optim.zero_grad()
 
             feature = net_feat(inputs)
+            feature_rec, loss_lpca = net_lpca(feature)
+            outputs = net_cls(feature_rec)
 
-            if dist is not None:
-                k = np.random.choice(range(len(mask_feat_dim)), p=dist)
-                mask_k = mask_feat_dim[k]
-                feature_masked = feature * mask_k
-            else:
-                feature_masked = F.dropout(feature, p=dropout, training=True)
+            loss_ce = criterion(outputs, targets)
+            loss_total = loss_ce + eta * loss_lpca
 
-            outputs = net_cls(feature_masked)
-
-            loss = criterion(outputs, targets)
-
-            loss.backward()
-            for optim in optimizer:
+            loss_total.backward()
+            for optim in optimizer1:
+                optim.step()
+            for optim in optimizer2:
                 optim.step()
 
             acc1, acc5 = utils.accuracy(outputs, targets, topk=(1, 5))
-            losses.update(loss.item(), inputs.size()[0])
+            losses_total.update(loss_total.item(), inputs.size()[0])
+            losses_ce.update(loss_ce.item(), inputs.size()[0])
+            losses_lpca.update(loss_lpca.item(), inputs.size()[0])
             top1.update(acc1[0].item(), inputs.size()[0])
             top5.update(acc5[0].item(), inputs.size()[0])
 
-            msg = 'Loss: {:.3f} | Lr : {:.5f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(losses.avg, lrUpdate, top1.avg, top5.avg)
-            utils.progress_bar(batchIdx, len(trainloader), msg)
+            msg = 'Loss_total: {:.3f} | Loss_ce: {:.3f} | Loss_lpca: {:.3f} | Lr : {:.5f} | Lrg : {:.5f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(losses_total.avg, losses_ce.avg, losses_lpca.avg, lrUpdate1, lrUpdate2, top1.avg, top5.avg)
+            logger.info(msg)
+            # utils.progress_bar(batchIdx, len(trainloader), msg)
 
 ### --------------------------------------------------------------------------------------------
 
@@ -309,7 +318,8 @@ def LrWarmUp(warmUpIter, lr, optimizer, net_feat, net_cls, trainloader, criterio
 #-----------------------------------------------------------------------------------------------
 #-----------------------------------------------------------------------------------------------
 
-def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, nbEpoch, batchsize, momentum=0.9, weightDecay = 5e-4, lrSchedule = [200, 300], mu=0, nested=1.0, resumePth=None, freeze_bn=False, pretrained=False):
+def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, eta, nbEpoch, batchsize, \
+        momentum=0.9, weightDecay = 5e-4, lrSchedule = [200, 300], num_pc=50, mu=0, nested=1.0, resumePth=None, freeze_bn=False, pretrained=False):
 
     best_acc = 0  # best test accuracy
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
@@ -320,15 +330,6 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
     net_feat = model.NetFeat(arch = arch,
                              pretrained = pretrained,
                              dataset = dataset)
-
-    net_cls = model.NetClassifier(feat_dim = net_feat.feat_dim,
-                                  nb_cls = nb_cls)
-
-    net_feat.cuda()
-    net_cls.cuda()
-    feat_dim = net_feat.feat_dim
-    best_k = feat_dim
-
     # generate mask
     mask_feat_dim = []
     for i in range(feat_dim):
@@ -339,25 +340,47 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
     # distribution and test function
     dist = GaussianDist(mu, nested, feat_dim) if nested > 0 else None
 
+    net_lpca = model.LPCA(feat_dim=net_feat.feat_dim, 
+                          num_pc=num_pc,
+                          mask_feat_dim=mask_feat_dim, 
+                          dist=dist)
+    net_cls = model.NetClassifier(feat_dim = net_feat.feat_dim,
+                                  nb_cls = nb_cls)
+
+    net_feat.cuda()
+    net_lpca.cuda()
+    net_cls.cuda()
+    feat_dim = net_feat.feat_dim
+    best_k = feat_dim
+
     Test = TestNested if nested > 0 else TestStandard
-
-    # load model
-    if resumePth :
-        param = torch.load(resumePth)
-        net_feat.load_state_dict(param['feat'])
-        print ('Loading feature weight from {}'.format(resumePth))
-
-        net_cls.load_state_dict(param['cls'])
-        print ('Loading classifier weight from {}'.format(resumePth))
-
 
     # output dir + loss + optimizer
     if not os.path.isdir(out_dir):
         os.mkdir(out_dir)
 
+    logger = utils.get_logger(out_dir)
+
+    # load model
+    if resumePth :
+        param = torch.load(resumePth)
+        net_feat.load_state_dict(param['feat'])
+        msg='Loading feature weight from {}'.format(resumePth)
+        logger.info(msg)
+
+        net_lpca.load_state_dict(param['lpca'])
+        msg='Loading LPCA weight from {}'.format(resumePth)
+        logger.info(msg)
+
+        net_cls.load_state_dict(param['cls'])
+        msg='Loading classifier weight from {}'.format(resumePth)
+        logger.info(msg)
+
     criterion = nn.CrossEntropyLoss()
 
-    optimizer = [torch.optim.SGD(itertools.chain(*[net_feat.parameters()]),
+    # Accumulate trainable parameters in 2 groups:
+    # 1. W_matrix 2. Network params
+    optimizer1 = [torch.optim.SGD(itertools.chain(*[net_feat.parameters()]),
                                                  1e-7,
                                                  momentum=args.momentum,
                                                  weight_decay=args.weightDecay),
@@ -366,21 +389,22 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
                                                  1e-7,
                                                  momentum=args.momentum,
                                                  weight_decay=args.weightDecay)]
+    optimizer2 = utils.stiefel_opti(itertools.chain(*[net_lpca.parameters()]), lrg=lrg)
 
     # learning rate warm up
-    LrWarmUp(warmUpIter, lr, optimizer, net_feat, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn)
+    LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn)
 
     with torch.no_grad():
         best_acc, acc, best_k = Test(0, best_acc, best_k, net_feat, net_cls, valloader, out_dir, mask_feat_dim, dropout)
 
     best_acc, best_k = 0, feat_dim
-    for optim in optimizer:
-        for g in optim.param_groups:
-            g['lr'] = lr
+    # for optim in optimizer:
+    #     for g in optim.param_groups:
+    #         g['lr'] = lr
 
     history = {'trainTop1':[], 'best_acc':[], 'trainTop5':[], 'valTop1':[], 'trainLoss':[], 'best_k':[]}
 
-    lrScheduler = [MultiStepLR(optim, milestones=lrSchedule, gamma=0.1) for optim in optimizer]
+    # lrScheduler = [MultiStepLR(optim, milestones=lrSchedule, gamma=0.1) for optim in optimizer]
 
     for epoch in range(nbEpoch):
         trainLoss, trainTop1, trainTop5 = Train(epoch, optimizer, net_feat, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn)
@@ -419,6 +443,7 @@ if __name__ == '__main__':
     # training
     parser.add_argument('--warmUpIter', type=int, default=6000, help='total iterations for learning rate warm')
     parser.add_argument('--lr', default=1e-1, type=float, help='learning rate')
+    parser.add_argument('--lrg', default=1e-4, type=float, help='learning rate of LPCA')
     parser.add_argument('--weightDecay', default=5e-4, type=float, help='weight decay')
     parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
     parser.add_argument('--batchsize', type=int, default=320, help='batch size')
@@ -427,7 +452,9 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=str, default='0', help='gpu devices')
 
     # model
+    parser.add_argument('--eta', default=0.1, type=float, help='coefficient for the lpca loss')
     parser.add_argument('--arch', type=str, choices=['resnet18', 'resnet50'], default='resnet18', help='which archtecture?')
+    parser.add_argument('--num-pc', type=int, default=50, help='number of pc in the KPCA block')
     parser.add_argument('--out-dir', type=str, help='output directory')
     parser.add_argument('--mu', type=float, default=0.0, help='nested mean hyperparameter')
     parser.add_argument('--nested', type=float, default=0.0, help='nested std hyperparameter')
@@ -460,6 +487,10 @@ if __name__ == '__main__':
 
          lr = args.lr,
 
+         lrg = args.lrg,
+
+         eta = args.eta,
+
          nbEpoch = args.nbEpoch,
 
          batchsize = args.batchsize,
@@ -469,6 +500,8 @@ if __name__ == '__main__':
          weightDecay = args.weightDecay,
 
          lrSchedule = args.lrSchedule,
+
+         num_pc = args.num_pc,
 
          mu = args.mu,
 

@@ -5,8 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 import torch.nn.init as init
 import math
-import model.cifar_resnet as cifar
-import stiefel_optimizer
+import cifar_resnet as cifar
 
 
 class NetFeat(nn.Module):
@@ -59,63 +58,56 @@ class NetFeat(nn.Module):
         x = torch.flatten(x, 1)
         return x
 
+# class Encoder(nn.Module):
+#     def __init__(self, ):
+#         super(Encoder, self).__init__()
+#         self.args = args
+#         self.main = nn.Sequential(
+#         ) # encoder structure
 
-class Encoder(nn.Module):
-    def __init__(self, ):
-        super(Encoder, self).__init__()
-        self.args = args
-        self.main = nn.Sequential(
-        ) # encoder structure
+#     def forward(self, x):
+#         return self.main(x)
 
-    def forward(self, x):
-        return self.main(x)
+# class Decoder(nn.Module):
+#     def __init__(self, ):
+#         super(Decoder, self).__init__()
+#         self.args = args
+#         self.main = nn.Sequential(
+#         ) # decoder structure
 
-class Decoder(nn.Module):
-    def __init__(self, ):
-        super(Decoder, self).__init__()
-        self.args = args
-        self.main = nn.Sequential(
-        ) # decoder structure
+#     def forward(self, x):
+#         return self.main(x)
 
-    def forward(self, x):
-        return self.main(x)
-
-class KPCA(nn.Module):
-    def __init__(self, args, ):
+class LPCA(nn.Module):
+    def __init__(self, feat_dim, num_pc, mask_feat_dim, dist=None, dropout=0.0):
         super(KPCA, self).__init__()
-        self.args = args
+        self.feat_dim = feat_dim
+        self.num_pc = num_pc
         # Initialize manifold parameter
-        self.W = nn.Parameter(nn.init.orthogonal_(torch.Tensor(self.args.h_dim, self.args.x_fdim2))) #W matrix, 512 x l (number principal components)
+        self.W = nn.Parameter(nn.init.orthogonal_(torch.Tensor(self.feat_dim, self.num_pc))) #W matrix, 512 x l (number principal components)
 
-        self.encoder = Encoder()
-        self.decoder = Decoder()
+        # self.encoder = Encoder()
+        # self.decoder = Decoder()
 
+    def forward(self, x_feat):
+        x_feat = x_feat - torch.mean(x_feat, dim=0)
+        # covariance matrix
+        Cov = torch.mm(x_feat.t(), x_feat)
 
-    def forward(self, x):
-        op1 = self.encoder(x)  # features
-        op1 = op1 - torch.mean(op1, dim=0)  # feature centering
-        C = torch.mm(op1.t(), op1)  # Covariance matrix
-        op2 = self.decoder(op1)
-        x_fold = torch.mm(torch.mm(op1, self.W.t()), self.W)
+        hidden_feat = torch.mm(x_feat, self.W)
 
-    f1 = torch.trace(C - torch.mm(torch.mm(self.W.t(), self.W), C))/x.size(0)  # KPCA
+        if dist is not None:
+            k = np.random.choice(range(len(mask_feat_dim)), p=dist)
+            mask_k = mask_feat_dim[k]
+            hidden_feat_masked = hidden_feat * mask_k
+        else:
+            hidden_feat_masked = F.dropout(hidden_feat, p=dropout, training=True)
 
-    return f1, op2
+        x_rec = torch.mm(hidden_feat_masked, self.W.t())
 
+        lpca_loss = torch.trace(Cov - torch.mm(torch.mm(self.W, self.W.t()), Cov))/x_rec.size(0)  # KPCA
 
-# Accumulate trainable parameters in 2 groups. 1. Manifold_params 2. Network param
-def param_state(model):
-    param_g, param_e1 = [], []
-    for name, param in model.named_parameters():
-        if param.requires_grad and name != 'W':
-            param_e1.append(param)
-        elif name == 'W':
-            param_g.append(param)
-    return param_g, param_e1
-
-def stiefel_opti(stief_param, lrg=1e-4):
-    dict_g = {'params': stief_param, 'lr': lrg, 'momentum': 0.9, 'weight_decay': 0.0005, 'stiefel': True}
-    return stiefel_optimizer.AdamG([dict_g])  # CayleyAdam
+        return x_rec, lpca_loss
 
 
 class NetClassifier(nn.Module):
@@ -132,20 +124,34 @@ class NetClassifier(nn.Module):
 
         return clsScore
 
+# # Accumulate trainable parameters in 2 groups. 1. Manifold_params 2. Network param
+# def param_state(model):
+#     param_g, param_e1 = [], []
+#     for name, param in model.named_parameters():
+#         if param.requires_grad and name != 'W':
+#             param_e1.append(param)
+#         elif name == 'W':
+#             param_g.append(param)
+#     return param_g, param_e1
 
+# def stiefel_opti(stief_param, lrg=1e-4):
+#     dict_g = {'params': stief_param, 'lr': lrg, 'momentum': 0.9, 'weight_decay': 0.0005, 'stiefel': True}
+#     return stiefel_optimizer.AdamG([dict_g])  # CayleyAdam
 
 
 if __name__ == '__main__':
 
     data = torch.randn(3, 3, 32, 32).cuda()
     net_feat = NetFeat(arch='resnet18', pretrained=False, dataset='CIFAR100')
-    kpca = KPCA(net_feat.feat_dim, l)
-    net_cls = NetClassifier(net_feat.feat_dim, 10)
+    net_lpca = LPCA(net_feat.feat_dim, num_pc=50)
+    net_cls = NetClassifier(net_feat.feat_dim, 100)
 
     net_feat.cuda()
+    net_lpca.cuda()
     net_cls.cuda()
 
     feat = net_feat(data)
     print (feat.size())
-    score = net_cls(feat)
-    print (score.size())
+    x_rec, lpca_loss = net_lpca(feat)
+    preds = net_cls(x_rec)
+    print (preds.size())
