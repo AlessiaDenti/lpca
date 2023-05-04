@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 import torch.nn.init as init
 import math
-import cifar_resnet as cifar
+import model.cifar_resnet as cifar
 
 
 class NetFeat(nn.Module):
@@ -36,7 +36,7 @@ class NetFeat(nn.Module):
             resnet_feature_layers = ['conv1','bn1','relu','maxpool','layer1','layer2','layer3','layer4']
             resnet_module_list = [getattr(net,l) for l in resnet_feature_layers]
             last_layer_idx = resnet_feature_layers.index('layer4')
-            featExtractor = nn.Sequential(*(resnet_module_list[:last_layer_idx+1] + [nn.AvgPool2d(7, stride=1)]))   
+            featExtractor = nn.Sequential(*(resnet_module_list[:last_layer_idx+1] + [nn.AvgPool2d(7, stride=1)]))
 
             self.feat_net = featExtractor
 
