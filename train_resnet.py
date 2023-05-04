@@ -89,9 +89,10 @@ def GaussianDist(mu, std, N):
 
 
 ### ------------------------ Test with Nested (iterate all possible K) --------------------- ###
-def TestNested(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir, mask_feat_dim, dropout):
+def TestNested(logger, epoch, best_acc, best_k, net_feat, net_lpca, net_cls, valloader, out_dir, mask_feat_dim, dropout):
 
     net_feat.eval()
+    net_lpca.eval()
     net_cls.eval()
 
     bestTop1 = 0
@@ -104,10 +105,12 @@ def TestNested(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir, m
         targets = targets.cuda()
 
         feature = net_feat(inputs)
+        feature_rec, loss_lpca = net_lpca(feature)
         outputs = []
-
+# nested where?
         for i in range(len(mask_feat_dim)) :
-            feature_mask = feature * mask_feat_dim[i]
+            #feature_mask = feature * mask_feat_dim[i]
+            feature_mask = feature_rec * mask_feat_dim[i]
             outputs.append(net_cls(feature_mask).unsqueeze(0))
 
         outputs = torch.cat(outputs, dim=0)
@@ -122,13 +125,18 @@ def TestNested(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir, m
     acc, k = acc.item(), k.item()
 
     msg = '\nNested ... Epoch {:d}, Acc {:.3f} %, K {:d} (Best Acc {:.3f} %)'.format(epoch, acc * 100, k, best_acc * 100)
-    print (msg)
+    #print (msg)
+    logger.info(msg)
 
     if acc > best_acc:
         msg = 'Best Performance improved from {:.3f} --> {:.3f}'.format(best_acc, acc)
         print (msg)
+        # logger.info(msg)
         print ('Saving Best!!!')
+        # msg='Saving Best!!!'
+        # logger.info(msg)
         param = {'feat': net_feat.state_dict(),
+                 'lpca': net_lpca.state_dict(),
                  'cls': net_cls.state_dict(),
                  }
         torch.save(param, os.path.join(out_dir, 'netBest.pth'))
@@ -142,9 +150,10 @@ def TestNested(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir, m
 
 
 ### ---------------- Test standard (used for model w/o nested, baseline, dropout) ---------- ###
-def TestStandard(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir, mask_feat_dim, dropout):
+def TestStandard(logger, epoch, best_acc, best_k, net_feat, net_lpca, net_cls, valloader, out_dir, mask_feat_dim, dropout):
 
     net_feat.eval()
+    net_lpca.eval()
     net_cls.eval()
 
     bestTop1 = 0
@@ -158,7 +167,8 @@ def TestStandard(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir,
 
         feature = net_feat(inputs)
         feature = F.dropout(feature, p=dropout, training=False)
-        outputs = net_cls(feature)
+        feature_rec = net_lpca(feature)
+        outputs = net_cls(feature_rec)
 
         _, pred = torch.max(outputs, dim=1)
 
@@ -169,14 +179,19 @@ def TestStandard(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir,
     acc = acc.item()
 
     msg = 'Standard ... Epoch {:d}, Acc {:.3f} %, (Best Acc {:.3f} %)'.format(epoch, acc * 100, best_acc * 100)
-    print (msg)
+    #print (msg)
+    logger.info(msg)
 
     # save checkpoint
     if acc > best_acc:
         msg = 'Best Performance improved from {:.3f} --> {:.3f}'.format(best_acc * 100, acc * 100)
-        print (msg)
-        print ('Saving Best!!!')
+        #print (msg)
+        logger.info(msg)
+        #print ('Saving Best!!!')
+        msg='Saving Best!!!'
+        logger.info(msg)
         param = {'feat': net_feat.state_dict(),
+                 'lpca': net_lpca.state_dict(),
                  'cls': net_cls.state_dict(),
                  }
         torch.save(param, os.path.join(out_dir, 'netBest.pth'))
@@ -191,15 +206,20 @@ def TestStandard(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir,
 # optimizer2 = torch.optim.Adam(param_e1, lr=opt.lr, weight_decay=0) # or SGD
 
 ### -------------------------------------- Training  --------------------------------------- ###
-def Train(epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, \
-        dist, mask_feat_dim, dropout, freeze_bn, lrSchedule, warmUpIter, ......):
+def Train(logger, epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, \
+        dist, mask_feat_dim, dropout, freeze_bn, lrSchedule, warmUpIter, eta):
 
     msg = '\nEpoch: {:d}'.format(epoch)
-    print (msg)
+    # print(msg)
+    logger.info(msg)
+    
     net_feat.train(freeze_bn = freeze_bn)
+    net_lpca.train()
     net_cls.train()
 
-    losses = utils.AverageMeter()
+    losses_total = utils.AverageMeter()
+    losses_ce = utils.AverageMeter()
+    losses_lpca = utils.AverageMeter()
     top1 = utils.AverageMeter()
     top5 = utils.AverageMeter()
 
@@ -207,7 +227,9 @@ def Train(epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloade
         inputs = inputs.cuda()
         targets = targets.cuda()
 
-        for optim in optimizer:
+        for optim in optimizer1:
+            optim.zero_grad()
+        for optim in optimizer2:
             optim.zero_grad()
 
         feature = net_feat(inputs)
@@ -218,32 +240,32 @@ def Train(epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloade
             feature_masked = feature * mask_k
         else:
             feature_masked = F.dropout(feature, p=dropout, training=True)
-######
-        if kpca is not None:
-            loss_kpca, feature_masked = kpca(feature)
 
-        outputs = net_cls(feature_masked)
+        feature_rec, loss_lpca = net_lpca(feature)
+        outputs = net_cls(feature_rec)
 
-        loss1 = criterion(outputs, targets)
-        loss_total = loss1 + gamma * loss_kpca
+        loss_ce = criterion(outputs, targets)
+        loss_total = loss_ce + eta * loss_kpca
 
-        loss.backward()
-
-#
-        for optim in optimizer:
-            #optim.step()
-            optimizer2.step()
-            optimizer1.step()
+        loss_total.backward()
+        for optim in optimizer1:
+            optim.step()
+        for optim in optimizer2:
+            optim.step()
 
         acc1, acc5 = utils.accuracy(outputs, targets, topk=(1, 5))
-        losses.update(loss.item(), inputs.size()[0])
+        losses_total.update(loss_total.item(), inputs.size()[0])
+        losses_ce.update(loss_ce.item(), inputs.size()[0])
+        losses_lpca.update(loss_lpca.item(), inputs.size()[0])
         top1.update(acc1[0].item(), inputs.size()[0])
         top5.update(acc5[0].item(), inputs.size()[0])
 
-        msg = 'Loss: {:.3f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(losses.avg, top1.avg, top5.avg)
-        utils.progress_bar(batchIdx, len(trainloader), msg)
+        msg = 'Loss: {:.3f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(losses_total.avg, top1.avg, top5.avg)
+        logger.info(msg)
+        #utils.progress_bar(batchIdx, len(trainloader), msg)
 
-    return losses.avg, top1.avg, top5.avg
+    return losses_total.avg, top1.avg, top5.avg
+    # also return: losses_ce.avg, losses_lpca.avg, ?
 
 ### --------------------------------------------------------------------------------------------
 
@@ -340,9 +362,9 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
     # distribution and test function
     dist = GaussianDist(mu, nested, feat_dim) if nested > 0 else None
 
-    net_lpca = model.LPCA(feat_dim=net_feat.feat_dim, 
+    net_lpca = model.LPCA(feat_dim=net_feat.feat_dim,
                           num_pc=num_pc,
-                          mask_feat_dim=mask_feat_dim, 
+                          mask_feat_dim=mask_feat_dim,
                           dist=dist)
     net_cls = model.NetClassifier(feat_dim = net_feat.feat_dim,
                                   nb_cls = nb_cls)
@@ -395,7 +417,7 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
     LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn)
 
     with torch.no_grad():
-        best_acc, acc, best_k = Test(0, best_acc, best_k, net_feat, net_cls, valloader, out_dir, mask_feat_dim, dropout)
+        best_acc, acc, best_k = Test(logger, 0, best_acc, best_k, net_feat, net_lpca, net_cls, valloader, out_dir, mask_feat_dim, dropout)
 
     best_acc, best_k = 0, feat_dim
     # for optim in optimizer:
@@ -407,9 +429,9 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
     # lrScheduler = [MultiStepLR(optim, milestones=lrSchedule, gamma=0.1) for optim in optimizer]
 
     for epoch in range(nbEpoch):
-        trainLoss, trainTop1, trainTop5 = Train(epoch, optimizer, net_feat, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, freeze_bn)
+        trainLoss, trainTop1, trainTop5 = Train(logger, epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, trainloader, criterion, dist, mask_feat_dim, dropout, eta)
         with torch.no_grad() :
-            best_acc, valTop1, best_k = Test(epoch, best_acc, best_k, net_feat, net_cls, valloader, out_dir, mask_feat_dim, dropout)
+            best_acc, valTop1, best_k = Test(logger, epoch, best_acc, best_k, net_feat, net_lpca, net_cls, valloader, out_dir, mask_feat_dim, dropout)
 
         history['trainTop1'].append(trainTop1)
         history['trainTop5'].append(trainTop5)
@@ -427,6 +449,7 @@ def main(gpu, arch, dropout, out_dir, dataset, train_dir, val_dir, warmUpIter, l
 
     msg = 'mv {} {}'.format(out_dir, '{}_Acc{:.3f}_K{:d}'.format(out_dir, best_acc, best_k))
     print (msg)
+    #logger.info(msg)
     os.system(msg)
 
 
