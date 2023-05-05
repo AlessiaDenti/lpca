@@ -130,11 +130,11 @@ def TestNested(logger, epoch, best_acc, best_k, net_feat, net_lpca, net_cls, val
 
     if acc > best_acc:
         msg = 'Best Performance improved from {:.3f} --> {:.3f}'.format(best_acc, acc)
-        print (msg)
-        # logger.info(msg)
-        print ('Saving Best!!!')
-        # msg='Saving Best!!!'
-        # logger.info(msg)
+        #print (msg)
+        logger.info(msg)
+        #print ('Saving Best!!!')
+        msg='Saving Best!!!'
+        logger.info(msg)
         param = {'feat': net_feat.state_dict(),
                  'lpca': net_lpca.state_dict(),
                  'cls': net_cls.state_dict(),
@@ -167,7 +167,7 @@ def TestStandard(logger, epoch, best_acc, best_k, net_feat, net_lpca, net_cls, v
 
         feature = net_feat(inputs)
         feature = F.dropout(feature, p=dropout, training=False)
-        feature_rec = net_lpca(feature)
+        feature_rec, loss_lpca = net_lpca(feature)
         outputs = net_cls(feature_rec)
 
         _, pred = torch.max(outputs, dim=1)
@@ -212,7 +212,7 @@ def Train(logger, epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, tr
     msg = '\nEpoch: {:d}'.format(epoch)
     # print(msg)
     logger.info(msg)
-    
+
     net_feat.train(freeze_bn = freeze_bn)
     net_lpca.train()
     net_cls.train()
@@ -241,7 +241,7 @@ def Train(logger, epoch, optimizer1, optimizer2, net_feat, net_lpca, net_cls, tr
         else:
             feature_masked = F.dropout(feature, p=dropout, training=True)
 
-        feature_rec, loss_lpca = net_lpca(feature)
+        feature_rec, loss_lpca = net_lpca(feature_masked)
         outputs = net_cls(feature_rec)
 
         loss_ce = criterion(outputs, targets)
