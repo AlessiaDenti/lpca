@@ -80,14 +80,16 @@ class NetFeat(nn.Module):
 
 class LPCA(nn.Module):
     def __init__(self, feat_dim, num_pc, mask_feat_dim, dist=None, dropout=0.0):
-        super(KPCA, self).__init__()
+        super(LPCA, self).__init__()
         self.feat_dim = feat_dim
         self.num_pc = num_pc
         # Initialize manifold parameter
         self.W = nn.Parameter(nn.init.orthogonal_(torch.Tensor(self.feat_dim, self.num_pc))) #W matrix, 512 x l (number principal components)
-
+        self.dist = dist
+        self.dropout = dropout
         # self.encoder = Encoder()
         # self.decoder = Decoder()
+        self.mask_feat_dim = mask_feat_dim
 
     def forward(self, x_feat):
         x_feat = x_feat - torch.mean(x_feat, dim=0)
@@ -96,18 +98,50 @@ class LPCA(nn.Module):
 
         hidden_feat = torch.mm(x_feat, self.W)
 
-        if dist is not None:
-            k = np.random.choice(range(len(mask_feat_dim)), p=dist)
-            mask_k = mask_feat_dim[k]
-            hidden_feat_masked = hidden_feat * mask_k
+        if self.dist is not None:
+            k = np.random.choice(range(len(self.mask_feat_dim)), p=self.dist)
+            mask_k = self.mask_feat_dim[k]
+            #hidden_feat_masked = hidden_feat * mask_k
+            hidden_feat_masked = (hidden_feat.t()* mask_k[0][0:320]).t()
+            #for i in range(50) :
+            #    hidden_feat_masked[:,i] = hidden_feat[:,i] * mask_k[0][0:320]
         else:
-            hidden_feat_masked = F.dropout(hidden_feat, p=dropout, training=True)
+            hidden_feat_masked = F.dropout(hidden_feat, p=self.dropout, training=True)
 
         x_rec = torch.mm(hidden_feat_masked, self.W.t())
 
-        lpca_loss = torch.trace(Cov - torch.mm(torch.mm(self.W, self.W.t()), Cov))/x_rec.size(0)  # KPCA
+        lpca_loss = torch.trace(Cov - torch.mm(torch.mm(self.W, self.W.t()), Cov))/x_rec.size(0)
 
         return x_rec, lpca_loss
+
+# nested
+    def forward_eval(self, x_feat):
+        x_feat = x_feat - torch.mean(x_feat, dim=0)
+        # covariance matrix
+        Cov = torch.mm(x_feat.t(), x_feat)
+
+        hidden_feat = torch.mm(x_feat, self.W)
+
+        hidden_feat_mask = []
+
+        for i in range(len(self.mask_feat_dim)) :
+            #hidden_mask = hidden_feat * self.mask_feat_dim[i]
+            hidden_feat_mask_m = []
+            for o in range(hidden_feat.shape[1]):
+                hidden_feat_mask_m.append( hidden_feat[:,o].view(320,1)*self.mask_feat_dim[i])
+            hidden_feat_mask_m = torch.cat(hidden_feat_mask_m, dim=0)
+            hidden_feat_mask.append(hidden_feat_mask_m)
+           # hidden_feat_mask.append(net_cls(hidden_mask).unsqueeze(0))
+
+        hidden_feat_mask = torch.cat(hidden_feat_mask, dim=0)
+        x_rec = torch.mm(hidden_feat_mask, self.W.t())
+
+        lpca_loss = torch.trace(Cov - torch.mm(torch.mm(self.W, self.W.t()), Cov))/x_rec.size(0)
+
+        return x_rec, lpca_loss
+
+
+
 
 
 class NetClassifier(nn.Module):
