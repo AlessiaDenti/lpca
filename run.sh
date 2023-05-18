@@ -4,13 +4,13 @@
 python train_preactresnet.py --train-dir ./data/CIFAR10/train/ --val-dir ./data/CIFAR10/val/ --dataset CIFAR10 --arch PreActResNet18 --out-dir ./checkpoints/cifar10_preActResNet18 --gpu 0
 
 # Nested=10
-python train_preactresnet.py --train-dir ./data/CIFAR10/train/ --val-dir ./data/CIFAR10/val/ --dataset CIFAR10 --arch PreActResNet18 --out-dir ./checkpoints/cifar10_preActResNet18_nbpc100_nested10 --num-pc 100 --nested 10 --gpu 0
+python train_preactresnet.py --train-dir ./data/CIFAR10/train/ --val-dir ./data/CIFAR10/val/ --dataset CIFAR10 --arch PreActResNet18 --out-dir ./checkpoints/cifar10_preActResNet18_nbpc100_nested10_eta001 --num-pc 100 --nested 10 --eta 0.01 --gpu 0
 
 
 ## CIFAR-10 Symmetric 20% ##############################
 
 # Nested=10
-python train_preactresnet.py --train-dir ./data/CIFAR10/train_sn_0.2/ --val-dir ./data/CIFAR10/val/ --dataset CIFAR10 --arch PreActResNet18 --out-dir ./checkpoints/cifar10sn0.2_preActResNet18_nbpc100_nested10 --num-pc 100 --nested 10 --gpu 0
+python train_preactresnet.py --train-dir ./data/CIFAR10/train_sn_0.2/ --val-dir ./data/CIFAR10/val/ --dataset CIFAR10 --arch PreActResNet18 --out-dir ./checkpoints/cifar10sn0.2_preActResNet18_nbpc100_nested10_eta001 --num-pc 100 --nested 10 --eta 0.01 --gpu 0
 
 
 
