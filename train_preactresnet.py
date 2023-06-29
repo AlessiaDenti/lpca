@@ -20,6 +20,8 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 import torch.nn.functional as F
 
+from timm.data import Mixup
+
 
 ### ------------------------------------ Dataloader -------------------------------------- ###
 def get_dataloader(dataset, train_dir, val_dir, batchsize):
@@ -63,13 +65,13 @@ def get_dataloader(dataset, train_dir, val_dir, batchsize):
 ### --------------------------------------------------------------------------------------------
 
 
-### ------------------------ Compute mean_feat on whole training set ----------------------- ###  
+### ------------------------ Compute mean_feat on whole training set ----------------------- ###
 def Statistics(trainloader, net):
     net.eval()
     feat_list = []
 
-    for batchIdx, (inputs, targets) in enumerate(trainloader) :        
-        inputs = inputs.cuda() 
+    for batchIdx, (inputs, targets) in enumerate(trainloader) :
+        inputs = inputs.cuda()
         targets = targets.cuda()
 
         x_feat_raw = net(inputs)[1]
@@ -104,7 +106,7 @@ def TestNested(logger, epoch, best_acc, best_k, net, valloader, out_dir, mask_fe
         targets = targets.cuda()
 
         feature = net(inputs)[2]
-        hidden_feat = torch.mm(feature, net.W.t()) 
+        hidden_feat = torch.mm(feature, net.W.t())
         outputs = []
 
         for i in range(len(mask_feat_dim)):
@@ -183,7 +185,7 @@ def TestStandard(logger, epoch, best_acc, best_k, net, valloader, out_dir, mask_
 
 
 ### -------------------------------------- Training  --------------------------------------- ###
-def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim, eta):
+def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim, mixup_fn, eta):
 
     msg = '\nEpoch: {:d}'.format(epoch)
     logger.info(msg)
@@ -200,17 +202,26 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
         inputs = inputs.cuda()
         targets = targets.cuda()
 
+        if mixup_fn is not None :
+            inputs_mixup, targets_mixup = mixup_fn(inputs, targets)
+
         optimizer1.zero_grad()
         optimizer2.zero_grad()
 
-        if dist is not None: 
+        if dist is not None:
             k = np.random.choice(range(len(mask_feat_dim)), p=dist)
             net.netsed_k = k
             outputs, _, _, loss_lpca = net(inputs)
+        elif mixup_fn is not None:
+            outputs, _, _, loss_lpca = net(inputs_mixup)
         else:
             outputs, _, _, loss_lpca = net(inputs)
 
-        loss_ce = criterion(outputs, targets)
+        if mixup_fn is not None :
+            loss_ce = criterion(outputs, targets_mixup)
+        else:
+            loss_ce = criterion(outputs, targets)
+
         loss_total = loss_ce + eta * loss_lpca
 
         loss_total.backward()
@@ -224,7 +235,7 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
         top1.update(acc1[0].item(), inputs.size()[0])
         top5.update(acc5[0].item(), inputs.size()[0])
 
-        if batchIdx % 50 == 0 : 
+        if batchIdx % 50 == 0 :
             msg = 'batchIdx: {:d}/{:d} | Loss Total: {:.3f} | Loss Ce: {:.3f} | Loss LPCA: {:.3f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(batchIdx, len(trainloader), losses_total.avg, losses_ce.avg, losses_lpca.avg, top1.avg, top5.avg)
             logger.info(msg)
 
@@ -265,7 +276,7 @@ def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trai
             optimizer1.zero_grad()
             optimizer2.zero_grad()
 
-            if dist is not None: 
+            if dist is not None:
                 k = np.random.choice(range(len(mask_feat_dim)), p=dist)
                 net.netsed_k = k
                 outputs, _, _, loss_lpca = net(inputs)
@@ -286,7 +297,7 @@ def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trai
             top1.update(acc1[0].item(), inputs.size()[0])
             top5.update(acc5[0].item(), inputs.size()[0])
 
-            if nbIter % 200 == 0 : 
+            if nbIter % 200 == 0 :
                 msg = 'Training Iter: {:d} / {:d} | Loss_total: {:.3f} | Loss_ce: {:.3f} | Loss_lpca: {:.3f} | Lr : {:.5f} | Lrg : {:.5f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(nbIter, warmUpIter, losses_total.avg, losses_ce.avg, losses_lpca.avg, lrUpdate1, lrUpdate2, top1.avg, top5.avg)
                 logger.info(msg)
 
@@ -300,7 +311,7 @@ def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trai
 #-----------------------------------------------------------------------------------------------
 
 def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, eta, nbEpoch, batchsize, \
-        momentum=0.9, weightDecay = 5e-4, lrSchedule = [200, 300], num_pc=50, mu=0, nested=1.0, resumePth=None):
+        momentum=0.9, weightDecay = 5e-4, lrSchedule = [200, 300], num_pc=50, mu=0, nested=1.0, mixup = 0, resumePth=None):
 
     best_acc = 0  # best test accuracy
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
@@ -331,11 +342,17 @@ def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, e
     logger = utils.get_logger(out_dir)
 
     # load model
-    if resumePth: 
+    if resumePth:
         param = torch.load(resumePth)
         net.load_state_dict(param['net'])
         msg = 'Loading net weight from {}'.format(resumePth)
         logger.info(msg)
+
+    mixup_fn = None
+    mixup_active = args.mixup > 0
+    if mixup_active:
+        print("Mixup is activated!")
+        mixup_fn = Mixup(mixup_alpha=args.mixup, prob=1, num_classes=nb_cls)
 
     criterion = nn.CrossEntropyLoss()
 
@@ -343,7 +360,7 @@ def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, e
     # 1. U_matrix 2. Network params
     param_g, param_el = utils.param_state(net)
 
-    # optimization over the classifier 
+    # optimization over the classifier
     optimizer1 = torch.optim.SGD(param_el,
                                  lr = 1e-7,
                                  momentum = momentum,
@@ -371,7 +388,7 @@ def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, e
     lrgScheduler = MultiStepLR(optimizer2, milestones=lrSchedule, gamma=0.2)
 
     for epoch in range(nbEpoch):
-        trainLoss_total, trainLoss_ce, trainLoss_lpca, trainTop1, trainTop5 = Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim, eta)
+        trainLoss_total, trainLoss_ce, trainLoss_lpca, trainTop1, trainTop5 = Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim,  mixup, eta)
 
         with torch.no_grad() :
             # we update the mean_feat
@@ -435,6 +452,7 @@ if __name__ == '__main__':
     parser.add_argument('--nested', type=float, default=0.0, help='nested std hyperparameter')
     parser.add_argument('--resumePth', type=str, help='resume path')
 
+
     args = parser.parse_args()
     print (args)
 
@@ -473,5 +491,7 @@ if __name__ == '__main__':
          mu = args.mu,
 
          nested = args.nested,
+
+         mixup == args.mixup,
 
          resumePth = args.resumePth)
