@@ -203,7 +203,13 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
         targets = targets.cuda()
 
         if mixup_fn is not None :
-            inputs_mixup, targets_mixup = mixup_fn(inputs, targets)
+            inputs_mixup, targets_mix = mixup_fn(inputs, targets)
+            #targets_mixups = targets_mix.cuda()
+            targets_mixu = targets_mix.type(torch.cuda.LongTensor)
+            targets_mixup = targets_mixu.argmax(1)
+            #inputs_mixup = inputs_mixup.cuda()
+            #targets_mixup = targets_mixup.cuda()
+
 
         optimizer1.zero_grad()
         optimizer2.zero_grad()
@@ -211,7 +217,10 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
         if dist is not None:
             k = np.random.choice(range(len(mask_feat_dim)), p=dist)
             net.netsed_k = k
-            outputs, _, _, loss_lpca = net(inputs)
+            if mixup_fn is not None:
+                outputs, _, _, loss_lpca = net(inputs_mixup)
+            else:
+                outputs, _, _, loss_lpca = net(inputs)
         elif mixup_fn is not None:
             outputs, _, _, loss_lpca = net(inputs_mixup)
         else:
@@ -229,11 +238,19 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
         optimizer2.step()
 
         acc1, acc5 = utils.accuracy(outputs, targets, topk=(1, 5))
-        losses_total.update(loss_total.item(), inputs.size()[0])
-        losses_ce.update(loss_ce.item(), inputs.size()[0])
-        losses_lpca.update(loss_lpca.item(), inputs.size()[0])
-        top1.update(acc1[0].item(), inputs.size()[0])
-        top5.update(acc5[0].item(), inputs.size()[0])
+        if mixup_fn is not None:
+            losses_total.update(loss_total.item(), inputs_mixup.size()[0])
+            losses_ce.update(loss_ce.item(), inputs_mixup.size()[0])
+            losses_lpca.update(loss_lpca.item(), inputs_mixup.size()[0])
+            top1.update(acc1[0].item(), inputs_mixup.size()[0])
+            top5.update(acc5[0].item(), inputs_mixup.size()[0])
+        else:
+            losses_total.update(loss_total.item(), inputs.size()[0])
+            losses_ce.update(loss_ce.item(), inputs.size()[0])
+            losses_lpca.update(loss_lpca.item(), inputs.size()[0])
+            top1.update(acc1[0].item(), inputs.size()[0])
+            top5.update(acc5[0].item(), inputs.size()[0])
+
 
         if batchIdx % 50 == 0 :
             msg = 'batchIdx: {:d}/{:d} | Loss Total: {:.3f} | Loss Ce: {:.3f} | Loss LPCA: {:.3f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(batchIdx, len(trainloader), losses_total.avg, losses_ce.avg, losses_lpca.avg, top1.avg, top5.avg)
@@ -388,7 +405,7 @@ def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, e
     lrgScheduler = MultiStepLR(optimizer2, milestones=lrSchedule, gamma=0.2)
 
     for epoch in range(nbEpoch):
-        trainLoss_total, trainLoss_ce, trainLoss_lpca, trainTop1, trainTop5 = Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim,  mixup, eta)
+        trainLoss_total, trainLoss_ce, trainLoss_lpca, trainTop1, trainTop5 = Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim,  mixup_fn, eta)
 
         with torch.no_grad() :
             # we update the mean_feat
@@ -450,8 +467,8 @@ if __name__ == '__main__':
     parser.add_argument('--out-dir', type=str, help='output directory')
     parser.add_argument('--mu', type=float, default=0.0, help='nested mean hyperparameter')
     parser.add_argument('--nested', type=float, default=0.0, help='nested std hyperparameter')
+    parser.add_argument('--mixup', type=float, default=0.0, help='mixup alpha, mixup enabled if > 0.')
     parser.add_argument('--resumePth', type=str, help='resume path')
-
 
     args = parser.parse_args()
     print (args)
@@ -492,6 +509,6 @@ if __name__ == '__main__':
 
          nested = args.nested,
 
-         mixup == args.mixup,
+         mixup = args.mixup,
 
          resumePth = args.resumePth)
