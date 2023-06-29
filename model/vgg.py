@@ -40,7 +40,7 @@ class VGG(nn.Module):
         """
         Override the default train() to freeze the BN parameters
         """
-        super(Net, self).train(mode)
+        super(VGG, self).train(mode)
         self.freeze_bn = freeze_bn
         if self.freeze_bn :
             for m in self.modules() :
@@ -70,10 +70,10 @@ class VGG(nn.Module):
         x = self.feat_net.features(x)
         x = self.feat_net.avgpool(x)
         x = torch.flatten(x, 1)
-        x_feat = self.forward1(x)
+        x_feat = self.forward(x)
         if self.vgg_dropout > 0 :
             x_feat = self.dropout1(x_feat)
-        x_feat = self.forward2(x_feat)
+        x_feat = self.forward(x_feat)
 
         if mean_feat is not None :
             x_feat = x_feat_raw - mean_feat
@@ -100,7 +100,7 @@ if __name__ == '__main__' :
     h_dim = 100
 
     # network
-    net = Net(h_dim = h_dim,
+    net = VGG(h_dim = h_dim,
               nb_cls = 10,
               pretrained = True)
 
