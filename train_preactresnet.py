@@ -21,6 +21,7 @@ from torchvision.datasets import ImageFolder
 import torch.nn.functional as F
 
 from timm.data import Mixup
+from timm.loss import SoftTargetCrossEntropy
 
 
 ### ------------------------------------ Dataloader -------------------------------------- ###
@@ -203,13 +204,7 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
         targets = targets.cuda()
 
         if mixup_fn is not None :
-            inputs_mixup, targets_mix = mixup_fn(inputs, targets)
-            #targets_mixups = targets_mix.cuda()
-            targets_mixu = targets_mix.type(torch.cuda.LongTensor)
-            targets_mixup = targets_mixu.argmax(1)
-            #inputs_mixup = inputs_mixup.cuda()
-            #targets_mixup = targets_mixup.cuda()
-
+            inputs_mixup, targets_mixup = mixup_fn(inputs, targets)
 
         optimizer1.zero_grad()
         optimizer2.zero_grad()
@@ -262,7 +257,7 @@ def Train(logger, epoch, optimizer1, optimizer2, net, trainloader, criterion, di
 
 
 ### ------------------------------------ Lr Warm Up  --------------------------------------- ###
-def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim) :
+def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim, mixup_fn) :
 
     nbIter = 0
 
@@ -289,16 +284,29 @@ def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trai
 
             inputs = inputs.cuda()
             targets = targets.cuda()
-
+            
+            if mixup_fn is not None:
+                inputs_mixup, targets_mixup = mixup_fn(inputs, targets)
+                
             optimizer1.zero_grad()
             optimizer2.zero_grad()
 
             if dist is not None:
                 k = np.random.choice(range(len(mask_feat_dim)), p=dist)
                 net.netsed_k = k
-                outputs, _, _, loss_lpca = net(inputs)
+                if mixup_fn is not None:
+                    outputs, _, _, loss_lpca = net(inputs_mixup)
+                else:
+                    outputs, _, _, loss_lpca = net(inputs)
+            elif mixup_fn is not None:
+                outputs, _, _, loss_lpca = net(inputs_mixup)
             else:
                 outputs, _, _, loss_lpca = net(inputs)
+
+            if mixup_fn is not None:
+                loss_ce = criterion(outputs, targets_mixup)
+            else:
+                loss_ce = criterion(outputs, targets)
 
             loss_ce = criterion(outputs, targets)
             loss_total = loss_ce + eta * loss_lpca
@@ -308,11 +316,19 @@ def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trai
             optimizer2.step()
 
             acc1, acc5 = utils.accuracy(outputs, targets, topk=(1, 5))
-            losses_total.update(loss_total.item(), inputs.size()[0])
-            losses_ce.update(loss_ce.item(), inputs.size()[0])
-            losses_lpca.update(loss_lpca.item(), inputs.size()[0])
-            top1.update(acc1[0].item(), inputs.size()[0])
-            top5.update(acc5[0].item(), inputs.size()[0])
+            if mixup_fn is not None:
+                losses_total.update(loss_total.item(), inputs_mixup.size()[0])
+                losses_ce.update(loss_ce.item(), inputs_mixup.size()[0])
+                losses_lpca.update(loss_lpca.item(), inputs_mixup.size()[0])
+                top1.update(acc1[0].item(), inputs_mixup.size()[0])
+                top5.update(acc5[0].item(), inputs_mixup.size()[0])
+            else:
+                losses_total.update(loss_total.item(), inputs.size()[0])
+                losses_ce.update(loss_ce.item(), inputs.size()[0])
+                losses_lpca.update(loss_lpca.item(), inputs.size()[0])
+                top1.update(acc1[0].item(), inputs.size()[0])
+                top5.update(acc5[0].item(), inputs.size()[0])
+
 
             if nbIter % 200 == 0 :
                 msg = 'Training Iter: {:d} / {:d} | Loss_total: {:.3f} | Loss_ce: {:.3f} | Loss_lpca: {:.3f} | Lr : {:.5f} | Lrg : {:.5f} | Top1: {:.3f}% | Top5: {:.3f}%'.format(nbIter, warmUpIter, losses_total.avg, losses_ce.avg, losses_lpca.avg, lrUpdate1, lrUpdate2, top1.avg, top5.avg)
@@ -328,7 +344,7 @@ def LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trai
 #-----------------------------------------------------------------------------------------------
 
 def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, eta, nbEpoch, batchsize, \
-        momentum=0.9, weightDecay = 5e-4, lrSchedule = [200, 300], num_pc=50, mu=0, nested=1.0, mixup = 0, resumePth=None):
+        momentum=0.9, weightDecay = 5e-4, lrSchedule = [200, 300], num_pc=50, mu=0, nested=1.0, mixup = 0.0, resumePth=None):
 
     best_acc = 0  # best test accuracy
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
@@ -371,7 +387,11 @@ def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, e
         print("Mixup is activated!")
         mixup_fn = Mixup(mixup_alpha=args.mixup, prob=1, num_classes=nb_cls)
 
-    criterion = nn.CrossEntropyLoss()
+    # criterion for supervised learning loss
+    if mixup_fn is not None :
+        criterion = SoftTargetCrossEntropy().cuda(args.gpu)
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     # Accumulate trainable parameters in 2 groups:
     # 1. U_matrix 2. Network params
@@ -385,7 +405,7 @@ def main(gpu, arch, out_dir, dataset, train_dir, val_dir, warmUpIter, lr, lrg, e
     optimizer2 = utils.stiefel_opti(param_g, lrg=lrg)
 
     # learning rate warm up
-    LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim)
+    LrWarmUp(logger, warmUpIter, lr, lrg, eta, optimizer1, optimizer2, net, trainloader, criterion, dist, mask_feat_dim, mixup_fn)
 
     with torch.no_grad():
         # we update the mean_feat
