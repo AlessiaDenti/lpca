@@ -47,6 +47,26 @@ def get_dataloader(dataset, test_dir, batchsize):
 ### -------------------------------------------------------------------------------------------- 
 
 
+### ------------------------ Compute mean_feat on whole training set ----------------------- ###  
+def Statistics(testloader, net):
+    net.eval()
+    feat_list = []
+
+    for batchIdx, (inputs, targets) in enumerate(testloader) :
+        inputs = inputs.cuda()
+        targets = targets.cuda()
+
+        x_feat_raw = net(inputs)[1]
+        feat_list.append(x_feat_raw)
+
+    feat_list = torch.cat(feat_list, dim=0)
+    mean_feat = torch.mean(feat_list, dim=0)
+
+    return mean_feat
+
+### --------------------------------------------------------------------------------------------
+
+
 ### --------------------------- Test with nested (iterate all possible K) ------------------ ###  
 def TestNested(best_k, net, testloader, mask_feat_dim):
     
@@ -113,6 +133,8 @@ def main(gpu, arch, dataset, test_dir, batchsize, best_k, resumePth=None):
         print ('\t---Loading network weight from {}'.format(resumePth))
         
     with torch.no_grad(): 
+        mean_feat = Statistics(testloader, net)
+        net.mean_feat = mean_feat
         top1_acc, top5_acc = Test(best_k, net, testloader, mask_feat_dim)
 
     msg = '\t--- Test set: Top1: {:.3f}% | Top5: {:.3f}%'.format(top1_acc, top5_acc)
